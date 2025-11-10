@@ -39,27 +39,12 @@ Perfect for: Multi-domain conversations, specialist takeover, complex agent inte
 """
 
 from pydantic import BaseModel, Field
-from typing import Literal 
-from langchain_openai import ChatOpenAI
+from typing import Literal
+from utils import llm as model, State
 from agents.invoice_agent import graph as invoice_information_subagent
 from agents.music_agent import graph as music_catalog_subagent
 from langgraph.graph import StateGraph, START, END
-from langchain_core.runnables import RunnableConfig
 from langchain_core.messages import SystemMessage
-from typing_extensions import TypedDict
-from typing import Annotated
-from langgraph.graph.message import AnyMessage, add_messages
-from langgraph.managed.is_last_step import RemainingSteps
-
-class InputState(TypedDict):
-    messages: Annotated[list[AnyMessage], add_messages]
-
-class State(InputState):
-    customer_id: int
-    loaded_memory: str
-    remaining_steps: RemainingSteps 
-
-model = ChatOpenAI(model="o3-mini")
 
 # STRUCTURED OUTPUT MODEL
 # This Pydantic model defines the structure for routing decisions
@@ -88,7 +73,7 @@ If subagents are no longer needed to answer the user question or if a question i
 
 from langgraph.types import Command, Send
 
-def supervisor(state: State, config: RunnableConfig) -> Command[Literal["music_catalog_subagent", "invoice_information_subagent", END]]:
+def supervisor(state: State) -> Command[Literal["music_catalog_subagent", "invoice_information_subagent", END]]:
     """
     HANDOFFS PATTERN: Supervisor that decides which agent should have control.
     
@@ -143,7 +128,7 @@ def supervisor(state: State, config: RunnableConfig) -> Command[Literal["music_c
 
 # GRAPH CONSTRUCTION
 # This pattern uses Command + Send, so no ToolNode is needed
-supervisor_workflow = StateGraph(State, input_schema=InputState)
+supervisor_workflow = StateGraph(State)
 
 # Add nodes: supervisor and the subagent graphs
 supervisor_workflow.add_node("supervisor", supervisor, destinations=["music_catalog_subagent", "invoice_information_subagent", "__end__"])

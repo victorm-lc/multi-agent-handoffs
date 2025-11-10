@@ -1,177 +1,64 @@
-"""
-TOOL CALLING PATTERN (LangChain Multi-Agent)
+from agents.invoice_agent import graph as invoice_agent
+from agents.music_agent import graph as music_agent
+from utils import llm as model, State
 
-This implements the "Tool Calling" pattern from LangChain's multi-agent documentation:
-https://docs.langchain.com/oss/python/langchain/multi-agent.md#tool-calling
-
-In tool calling, one agent (the "controller") treats other agents as tools to be invoked when needed.
-The controller manages orchestration, while tool agents perform specific tasks and return results.
-
-Flow:
-1. The controller receives input and decides which tool (subagent) to call
-2. The tool agent runs its task based on the controller's instructions  
-3. The tool agent returns results to the controller
-4. The controller decides the next step or finishes
-
-Key characteristics:
-- Centralized control: all routing passes through the calling agent
-- Subagents are wrapped as @tool decorated functions
-- Tool agents don't talk to the user directly - they just run tasks and return results
-- Controller manages all orchestration and user interaction
-- Async execution enables parallel processing when multiple tools are called
-
-Benefits:
-- Centralized control over workflow
-- Easy to understand and implement
-- Standard LangGraph tool execution flow
-- Good for task orchestration and structured workflows
-- Parallel execution improves performance
-
-When to use (from LangChain docs):
-- Need centralized control over workflow? ✅ Yes
-- Want agents to interact directly with the user? ❌ No  
-- Complex, human-like conversation between specialists? ❌ Limited
-
-Perfect for: Task orchestration, structured workflows, supervisor-worker patterns
-"""
-
-from langchain_core.messages import SystemMessage
-from langchain_openai import ChatOpenAI
-from agents.invoice_agent import graph as invoice_subagent_graph
-from agents.music_agent import graph as music_subagent_graph
+from langchain.agents import create_agent
+from langchain.tools import tool, ToolRuntime
 from typing_extensions import TypedDict
 from typing import Annotated
 from langgraph.graph.message import AnyMessage, add_messages
-from langgraph.managed.is_last_step import RemainingSteps
-from langchain_core.tools import tool
-from langchain_core.runnables import RunnableConfig
-from langgraph.prebuilt import ToolNode, InjectedState, tools_condition
-from langgraph.graph import StateGraph, START, END
-from langchain_core.messages import HumanMessage
+from langchain.messages import HumanMessage
 
-# Standard LangGraph state schema - uses 'messages' field for compatibility with built-in tools
-class SupervisorState(TypedDict):
-    messages: Annotated[list[AnyMessage], add_messages]  # Standard message list for tool execution
-    customer_id: int  # Shared context that can be injected into tools
-    remaining_steps: RemainingSteps  # Standard LangGraph execution control
+supervisor_prompt = """You are an expert customer support assistant for a digital music store. You can handle music catalog or invoice related question regarding past purchases, song or album availabilities. 
+You are dedicated to providing exceptional service and ensuring customer queries are answered thoroughly, and have a team of subagents that you can use to help answer queries from customers. 
+Your primary role is to serve as a supervisor/planner for this multi-agent team that helps answer queries from customers. Always respond to the customer through summarizing the conversation, including individual responses from subagents. 
+If a question is unrelated to music or invoice, politely remind the customer regarding your scope of work. Do not answer unrelated answers. 
 
-model = ChatOpenAI(model="gpt-4o")
+Your team is composed of two subagents that you can use to help answer the customer's request:
+1. music_catalog_information_subagent: this subagent has access to user's saved music preferences. It can also retrieve information about the digital music store's music 
+catalog (albums, tracks, songs, etc.) from the database. This subagent has access to the user's memory profile, and music preferences! It will automatically be able to infer user's music preferences from the memory profile. 
+no need to pass customer identifier to this subagent.
+2. invoice_information_subagent: this subagent is able to retrieve information about a customer's past purchases or invoices 
+from the database. 
 
-# TOOL CALLING PATTERN IMPLEMENTATION
-# From LangChain docs: "In tool calling, one agent (the 'controller') treats other agents as tools"
-# These functions are decorated with @tool and use async execution to enable parallel processing.
-# The controller (supervisor) manages orchestration, while tool agents perform specific tasks and return results.
-# Key: Tool agents don't talk to the user directly - they just run their task and return results.
-@tool
-async def invoice_agent(task: str, customer_id: Annotated[int, InjectedState("customer_id")]):
-    """Handle invoice-related queries by processing customer requests about past purchases, billing information, and invoice details.
-    
-    This tool demonstrates async execution for parallel processing:
-    1. Use InjectedState to access shared context (customer_id)
-    2. Invoke subagent graph asynchronously with ainvoke()
-    3. Can run in parallel with other async tools
-    4. Extract and return the final response as a string
-    
-    Args:
-        task: The specific invoice-related task or question to handle
-        customer_id: Automatically injected from the supervisor's state
-    """
-    # Create a focused prompt for the invoice agent with the specific task
-    invoice_message = f"""You are an invoice specialist. Handle this customer request: {task}
-    
-    Focus on providing accurate information about invoices, billing, and purchase history."""
-    
-    # Invoke the subagent graph asynchronously - this enables parallel execution
-    # The subagent will execute completely and return its final state
-    input = {"messages": [HumanMessage(content=invoice_message)], "customer_id": customer_id}
-    invocation = await invoice_subagent_graph.ainvoke(input)
-    
-    # Extract the final response content and return as string
-    # This becomes the tool's response in the supervisor's conversation
-    response = invocation["messages"][-1].content
-    return response
+Based on the existing steps that have been taken in the messages, your role is to call the appropriate subagent based on the users query."""
 
-@tool
-async def music_catalog_agent(task: str):
-    """Handle music catalog queries by processing customer requests about songs, albums, artists, and music recommendations.
-    
-    This tool demonstrates async execution for parallel processing:
-    1. No additional state injection needed
-    2. Subagent is invoked asynchronously with ainvoke()
-    3. Can run in parallel with other async tools
-    4. Result is returned as string
-    
-    Args:
-        task: The specific music catalog task or question to handle
-    """
-    # Create a focused prompt for the music catalog agent with the specific task
-    music_prompt = f"""You are a music catalog specialist. Handle this customer request: {task}
-    
-    Focus on providing information about songs, albums, artists, and music recommendations from our catalog."""
-    
-    # Invoke the subagent graph asynchronously - enables parallel execution
-    input = {"messages": [HumanMessage(content=music_prompt)]}
-    invocation = await music_subagent_graph.ainvoke(input)
-    
-    # Return the subagent's final response
-    response = invocation["messages"][-1].content
-    return response
 
-# SUPERVISOR SETUP
-# Standard tool-calling pattern using LangGraph's built-in components
-tools = [invoice_agent, music_catalog_agent]
-supervisor_model = model.bind_tools(tools)  # Bind tools to the LLM for tool-calling
-tool_node = ToolNode(tools)  # Built-in node that executes tools and handles responses
+@tool(
+    name_or_callable="invoice_information_subagent",
+    description="""
+        An agent that can assistant with all invoice-related queries. It can retrieve information about a customers past purchases or invoices.
+        """
+)
+def call_invoice_information_subagent(runtime: ToolRuntime, query: str):
+    print('made it here')
+    print(f"invoice subagent input: {query}")
+    result = invoice_agent.invoke({
+        "messages": [HumanMessage(content=query)],
+        "customer_id": runtime.state.get("customer_id", {})
+    })
+    subagent_response = result["messages"][-1].content
+    return subagent_response
 
-supervisor_prompt = """You are an expert customer support assistant for a digital music store. You can handle music catalog or invoice related questions regarding past purchases, song or album availabilities. 
-Your primary role is to serve as a supervisor/planner for this multi-agent team that helps answer queries from customers.
+@tool(
+    name_or_callable="music_catalog_subagent",
+    description="""
+        An agent that can assistant with all music-related queries. This agent has access to user's saved music preferences. It can also retrieve information about the digital music store's music 
+        catalog (albums, tracks, songs, etc.) from the database. 
+        """
+)
+def call_music_catalog_subagent(runtime: ToolRuntime, query: str):
+    result = music_agent.invoke({
+        "messages": [HumanMessage(content=query)],
+        "loaded_memory": runtime.state.get("loaded_memory", {})
+    })
+    subagent_response = result["messages"][-1].content
+    return subagent_response
 
-You have access to two specialist tools that can execute in parallel:
-1. invoice_agent: Use this for questions about past purchases, billing information, invoice details, or payment history
-2. music_catalog_agent: Use this for questions about songs, albums, artists, music recommendations, or catalog availability
-
-When using these tools:
-- Pass the specific task/question as the 'task' parameter
-- Be clear and specific about what you want the specialist to handle
-- You can break down complex questions into multiple tool calls if needed
-- IMPORTANT: If a question involves both music and invoice aspects, call BOTH tools simultaneously - they will execute in parallel for faster response
-- For example, if asked "What music did I buy last month?", call both invoice_agent and music_catalog_agent at the same time
-
-If a question is unrelated to music or invoices, answer it directly without using the specialist tools.
-"""
-
-async def supervisor(state: SupervisorState, config: RunnableConfig):
-    """
-    Async supervisor node that decides whether to call tools or end the conversation.
-    
-    Uses async LangGraph tool-calling flow for parallel execution:
-    1. LLM decides whether to call tools based on the user's request
-    2. If multiple tools are called, they execute in parallel (thanks to async)
-    3. After tools execute, control returns to supervisor
-    4. Process repeats until no more tools are needed
-    """
-    response = await supervisor_model.ainvoke([SystemMessage(content=supervisor_prompt)] + state["messages"])
-    return {"messages": [response]}
-
-# GRAPH CONSTRUCTION
-# Async supervisor + tool-calling pattern with parallel execution capability
-supervisor_workflow = StateGraph(SupervisorState)
-
-# Add the async supervisor and tool execution nodes
-supervisor_workflow.add_node("supervisor", supervisor)
-supervisor_workflow.add_node("tool_node", tool_node)  # ToolNode automatically handles async tools
-
-# Define the flow:
-# 1. Start with supervisor
-# 2. Supervisor decides whether to call tools or end
-# 3. If multiple tools are called, they execute in parallel (async)
-# 4. After all tools complete, return to supervisor
-supervisor_workflow.add_edge(START, "supervisor")
-supervisor_workflow.add_edge("tool_node", "supervisor")  # Return to supervisor after tool execution
-supervisor_workflow.add_conditional_edges("supervisor", tools_condition, {
-    "tools": "tool_node",  # Route to tools if supervisor makes tool calls
-    "__end__": "__end__",  # End if no tool calls
-})
-
-# Compile the graph - LangGraph automatically handles async execution
-graph = supervisor_workflow.compile(name="supervisor")
+supervisor = create_agent(
+    model, 
+    tools=[call_invoice_information_subagent, call_music_catalog_subagent], 
+    name="supervisor",
+    system_prompt=supervisor_prompt, 
+    state_schema=State, 
+)

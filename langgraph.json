@@ -3,7 +3,7 @@
     "graphs": {
       "command": "./agents/handoff_tools.py:graph",
       "command-send": "./agents/command_send.py:graph",
-      "subagents_as_tools": "./agents/subagents_as_tools.py:graph",
+      "subagents_as_tools": "./agents/subagents_as_tools.py:supervisor",
       "invoice_agent": "./agents/invoice_agent.py:graph",
       "music_agent": "./agents/music_agent.py:graph"
     },
